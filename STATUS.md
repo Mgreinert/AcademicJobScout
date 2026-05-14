@@ -3,7 +3,7 @@
 Living document. Read this first when starting a new Claude conversation
 about this project. Update it at the end of each working session.
 
-**Last updated**: 2026-05-14 (end of session #1)
+**Last updated**: 2026-05-14 (end of session #2)
 
 ---
 
@@ -28,9 +28,12 @@ Local path on Matthew's Windows machine:
 ## Who's who
 
 - **Matthew Greinert** (Mgreinert / Thesq on Windows) — owner of the repo,
-  writes Git commits, drives the project. GitHub newbie; comfortable with
-  Git Bash basics now but needs explicit step-by-step instructions for
-  anything beyond `add/commit/push/pull`.
+  writes Git commits, drives the project. Comfortable with `add/commit/push`
+  basics; still a Python newbie, needs explicit step-by-step instructions
+  for code changes (indentation level, where in a file something goes, etc).
+  Tip for future Claudes: when asking him to edit a Python file, default to
+  giving him the **whole file** to paste in place rather than asking him to
+  insert lines at a specific location.
 - **Jasnea Sarma** — the researcher this bot serves. Her CV is the basis
   of `profile/jasnea.md`. She's not the one running the bot.
 
@@ -46,9 +49,9 @@ against `data/seen.sqlite`, scores survivors with Claude Haiku via
 and stub-mails it via `core/mailer.py`. Dedup state and digests are
 committed back to the repo by the GitHub Actions workflow each run.
 
-See `README.md` for the full layout and `core/digest.py` for the
-exact digest format (with the timestamp header and the "What the
-scrapers saw" diagnostic section).
+See `README.md` for the full layout and `core/digest.py` for the exact
+digest format (with the timestamp header and "What the scrapers saw"
+diagnostic section).
 
 ---
 
@@ -66,173 +69,96 @@ scrapers saw" diagnostic section).
   (prevents "poisoned DB" from a half-broken run)
 - ✅ `--force-rescore` flag to ignore dedup for unsticking situations
 - ✅ Playwright fetcher with `wait_for_selector` and `scroll_to_bottom`
-  knobs for JS-rendered sites (Workday etc.)
-- ✅ `test_university.py` local debug tool (Matthew has not yet used it —
-  Python is installed but the script hasn't been run locally)
+  knobs for JS-rendered sites
+- ✅ **RSS fetcher** (new in session #2) for sites that expose XML feeds —
+  far more reliable than HTML scraping. See `_parse_rss` in
+  `scouts/universities.py`.
+- ✅ `test_university.py` local debug tool, now cross-platform (uses
+  `tempfile.gettempdir()` instead of hardcoded `/tmp/`)
 - ✅ **Euraxess scraper** — finds ~20 postings/run. LLM correctly drops
-  all the STEM/medical postings as 1★. The signal-to-noise problem here
-  is real but expected (see "Euraxess limitations" below).
+  all the STEM/medical postings as 1★. Signal-to-noise is low but expected.
+- ✅ **All four university scrapers now working** (as of session #2):
+  - University of Washington (Playwright; 6 postings/run)
+  - Nanyang Technological University (Playwright + scroll; ~20/page)
+  - National University of Singapore (RSS feed; ~10/run after must_match)
+  - CUNY Graduate Center (Playwright; works locally, see caveat below)
 
 ---
 
 ## What's broken or unfinished
 
-### Four university scrapers all fail in slightly different ways
+### CUNY will probably 403 on GitHub Actions
 
-As of the last run (2026-05-14):
+CUNY's WAF blocks cloud IPs (Azure, AWS). The scraper works perfectly
+from Matthew's home machine via Playwright, but when the bot runs on
+GitHub Actions, it's expected to fail with 403. We're deferring this:
+the source-health system will show `FETCH_FAILED` weekly, which is
+honest reporting. Three eventual fixes to choose from later:
 
-1. **University of Washington** —
-   `jobs_url: https://ap.washington.edu/ahr/academic-jobs/`
-   Playwright reaches the page (no 403, good!) but parses **0 postings**.
-   Current selector `a[href*='position-details']` doesn't match the
-   rendered DOM. Need actual HTML to write a working selector.
+1. Find a CUNY RSS feed (gc.cuny.edu is Drupal-based; many such sites
+   expose one). Worth a check.
+2. Wait until an Interfolio aggregator scout is built — it would
+   resyndicate CUNY postings via a different (non-blocked) host.
+3. Accept the failure and let Matthew check CUNY manually.
 
-2. **National University of Singapore** —
-   `jobs_url: https://careers.nus.edu.sg/NUS/go/Academic-and-Research-Positions/545744/`
-   Playwright times out waiting for `a.jobTitle-link, tr.data-row, .job-title`.
-   The URL is probably right but the selector is wrong, or the page uses
-   different markup than expected SuccessFactors.
+### Euraxess limitations (unchanged from session #1)
 
-3. **Nanyang Technological University** —
-   `jobs_url: https://ntu.wd3.myworkdayjobs.com/Careers`
-   Playwright reaches the page but parses **0 postings**. Workday
-   `data-automation-id` attributes that should work in theory aren't
-   matching. May need an additional wait, or selectors may differ in
-   NTU's Workday config.
+- Only fetches the default search page (~20 postings, all fields).
+- LLM correctly drops everything irrelevant but most weeks Euraxess
+  produces zero kept matches — current postings are STEM-heavy.
+- See "Next steps" below for the planned improvement.
 
-4. **CUNY Graduate Center** —
-   `jobs_url: https://www.gc.cuny.edu/human-resources/employment-opportunities`
-   Returns **403 Forbidden** to plain requests. The gc.cuny.edu page is
-   WAF-protected from cloud IPs. Likely fix: switch to Playwright, or
-   pivot to a different URL (cuny.jobs aggregator, or HigherEdJobs
-   institution feed).
-
-### Euraxess limitations
-
-- Only fetches the default search page (~20 postings, all fields, all
-  countries). Euraxess strips query parameters from search URLs, so a
-  URL-based `?keywords=...` filter doesn't work.
-- The LLM correctly drops everything irrelevant, but this means most
-  weeks Euraxess produces zero kept matches — most recent postings are
-  in STEM fields.
-- See "Next: improving Euraxess" below.
-
-### Mailer
+### Mailer (unchanged from session #1)
 
 - Still stubbed (writes to `data/digests/<date>.md`).
 - Decision pending on Resend vs Gmail SMTP, plus recipient address.
-- Matthew said "later" — fine to defer until the scrapers are healthier
-  and there's actually something worth emailing.
+- Defer until aggregators are in and there's reliably good content to send.
 
-### Aggregators not yet built
+### Aggregators not yet built (unchanged priority list)
 
-Planned, in order of priority:
-1. **H-Net Job Guide** — strong for humanities/social sciences with
-   field tags. Should map cleanly to Jasnea's profile.
+1. **H-Net Job Guide** — strong for humanities/social sciences.
 2. **jobs.ac.uk** — UK and Commonwealth, with category filters.
-3. **AAG Jobs Center** — Association of American Geographers,
-   field-specific and directly on-target.
-4. **Interfolio search** — would cover UW and many other US universities
-   that route faculty hires through Interfolio (would partially obsolete
-   the UW direct scraper).
+3. **AAG Jobs Center** — Association of American Geographers.
+4. **Interfolio search** — would cover UW, CUNY, and many other US
+   universities that route faculty hires through Interfolio.
 5. **Academic Jobs Online (AJO)**, **HigherEdJobs**, **AAS Job Board**,
    **RGS-IBG** — later.
 
 ---
 
-## What we've already tried (so we don't repeat ourselves)
+## What we learned in session #2 (so we don't repeat ourselves)
 
-- **First Euraxess scout** used keyword-search URLs. Didn't work because
-  Euraxess strips query params. Replaced with default-search-page scrape.
-- **First UW URL** was the Workday portal (`uwhires.admin.washington.edu`).
-  Wrong — that's for non-academic staff. The correct page is
-  `ap.washington.edu/ahr/academic-jobs/`. Plain `requests` got 403 from
-  it; Playwright gets through but selectors still need tuning.
-- **First NTU URL** (`ntu.edu.sg/about-us/careers/job-opportunities`) was
-  404'd. NTU moved to Workday at `ntu.wd3.myworkdayjobs.com/Careers`.
-- **First CUNY URL** was `cuny.jobs/jobs/?cat=faculty`. Returned 0 postings.
-  Tried switching to `gc.cuny.edu/human-resources/employment-opportunities`
-  but that's 403-protected.
-- **First version of dedup** marked everything fetched as seen, even if
-  the LLM never scored it. This caused a "poisoned DB" issue: after one
-  broken run, all subsequent runs saw the same postings as "already seen"
-  and skipped LLM scoring entirely. **Fixed**: dedup now only marks
-  postings that were actually scored, and a `--force-rescore` flag exists
-  for recovering from this kind of state.
-
----
-
-## Immediate next steps (recommended order)
-
-1. **Use `test_university.py` to inspect the actual HTML for each broken
-   scraper.** Matthew now has Python 3.14 installed locally. Run from
-   the project folder:
-
-   ```
-   pip install -r requirements.txt
-   python -m playwright install chromium
-   python test_university.py "Washington" --raw
-   ```
-
-   This dumps the page HTML to `/tmp/University_of_Washington.html`.
-   Open it, paste relevant chunks (the structure of one job posting) to
-   the next Claude, and get exact selectors.
-
-   Repeat for NUS, NTU, CUNY.
-
-2. **Once the four universities work**, build the H-Net scout. H-Net's job
-   guide has stable HTML with field-tag filters, and is the highest-value
-   addition for Jasnea's field.
-
-3. **Then jobs.ac.uk and AAG.** These are also field-friendly.
-
-4. **Then consider improving Euraxess** by either (a) using Playwright to
-   submit the Research Field filter, or (b) reverse-engineering the
-   internal search API by inspecting network calls in a browser.
-
-5. **Once the digest reliably finds good matches, wire up real email**
-   (Resend or Gmail SMTP). Profile and recipient need to be confirmed.
+- **NUS exposes an RSS feed** at
+  `https://careers.nus.edu.sg/services/rss/category/?catid=545744`
+  (linked from the HTML page itself). RSS was much simpler and more
+  reliable than the JS-rendered portal. Worth checking for RSS first
+  on any SuccessFactors / SAP-based career site before reaching for
+  Playwright.
+- **Workday's `data-automation-id` attributes are the stable selectors.**
+  Auto-generated `css-1q2dra3`-style class names will change between
+  deploys and shouldn't be used. Also: NTU's `wait_for_selector` on an
+  individual title link timed out because of visibility issues — waiting
+  on the broader `jobResults` *section* (and adding `scroll_to_bottom`)
+  worked.
+- **UW's page structure** uses semantic `<li class="ap-job-item">` with
+  child spans for title/unit/location. The previous selector
+  (`a[href*='position-details']`) was matching the right anchor but
+  using it as the *posting unit*, so the title text was just "More info"
+  and must_match filtered everything out. Lesson: when the per-posting
+  card is rich, anchor on the wrapper element, not on the anchor tag.
+- **NTU is tech-heavy.** Even with a working scraper, expect most weeks
+  to produce 0 keeper postings because page 1 of 43 is biomedical and
+  engineering. Not a bug.
+- **Playwright with a home IP got through CUNY's WAF.** Plain `requests`
+  is hopeless. This is also a confirmation that the WAF distinguishes by
+  IP, not by browser fingerprint.
+- **For Python newbies, "paste the whole file" beats "insert these lines."**
+  We hit indentation and em-dash encoding errors when trying to splice in
+  a new method. The whole-file approach with explicit Ctrl+A → paste →
+  save is more reliable.
 
 ---
 
-## How a new chat should start
+## Carryover lessons from session #1
 
-Recommended opening message for a new conversation:
-
-> *I'm continuing work on an academic job scanner for my wife. Read
-> `STATUS.md` first, then `README.md`, then skim `config/universities.yaml`
-> and `main.py`. Today I want to [whatever the goal is].*
-
-Attach (or paste) the contents of those files. Claude can't browse the
-GitHub repo — files have to be in the conversation context.
-
-If working on a specific broken scraper, also attach a real DOM snippet
-(captured via `python test_university.py "<name>" --raw`).
-
----
-
-## Conventions worth keeping
-
-- **Always end a session by updating this STATUS.md** with what changed,
-  what's working/broken now, and what to do next.
-- **Local edits → `git pull --rebase` → commit → push.** The bot runs on
-  GitHub and commits back, so local always lags. Pulling first avoids
-  the "fetch first" rejection.
-- **Selector changes go in `config/universities.yaml`**, not in code,
-  unless a structural change is needed.
-- **Aggregator scouts are one Python file each** in `scouts/aggregators/`.
-  Each implements `Scout.fetch() -> list[Posting]`. Use
-  `scouts/aggregators/euraxess.py` as a template.
-- **When a scraper breaks**, don't guess at selectors — dump the real HTML
-  with `test_university.py --raw` and write selectors against the actual
-  DOM.
-
----
-
-## Open questions for Matthew
-
-- Final email recipient: Matthew, Jasnea, or both?
-- Email provider preference: Resend (clean, needs a domain) or Gmail SMTP
-  (no domain, uses app password)?
-- Once university scrapers work, are there other universities to add now,
-  or should we wait until aggregators are also in?
+- **First Euraxess scout** used ke

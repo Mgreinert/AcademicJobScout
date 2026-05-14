@@ -12,9 +12,10 @@ universities:
   # -------------------------------------------------------------------------
   - name: University of Washington
     jobs_url: https://ap.washington.edu/ahr/academic-jobs/
-    posting_selector: "a[href*='position-details']"
-    title_selector: "a[href*='position-details']"
+    posting_selector: "li.ap-job-item"
+    title_selector: "span.ap-job-title"
     link_selector: "a[href*='position-details']"
+    location_selector: "span.ap-job-location"
     must_match:
       - geography
       - asia
@@ -28,11 +29,12 @@ universities:
       - international
       - jackson school
     fetcher: playwright
-    wait_for_selector: "a[href*='position-details']"
+    wait_for_selector: "li.ap-job-item"
     notes: |
-      Jackson School of International Studies is the best fit. If parse_empty
-      again, run `python test_university.py "Washington" --raw` and inspect
-      the actual HTML for the right selectors.
+      AP page lists each posting as <li class="ap-job-item"> with title in
+      span.ap-job-title and a "More info" anchor pointing to position-details.
+      An "Apply now" anchor points to Interfolio for many but not all posts.
+      Jackson School of International Studies is the best fit for Jasnea.
 
   # -------------------------------------------------------------------------
   # National University of Singapore — Academic Positions search page
@@ -42,10 +44,10 @@ universities:
   # at the Academic and Research Positions search.
   # -------------------------------------------------------------------------
   - name: National University of Singapore
-    jobs_url: https://careers.nus.edu.sg/NUS/go/Academic-and-Research-Positions/545744/
-    posting_selector: "a.jobTitle-link, tr.data-row a"
-    title_selector: "a.jobTitle-link, tr.data-row a"
-    link_selector: "a.jobTitle-link, tr.data-row a"
+    jobs_url: https://careers.nus.edu.sg/services/rss/category/?catid=545744
+    posting_selector: "item"
+    title_selector: "title"
+    link_selector: "link"
     must_match:
       - geography
       - asia
@@ -56,11 +58,17 @@ universities:
       - social
       - humanities
       - global
-    fetcher: playwright
-    wait_for_selector: "a.jobTitle-link, tr.data-row, .job-title"
+      - middle east
+      - urban
+      - history
+      - international
+    fetcher: rss
     notes: |
-      SuccessFactors portal. If parse_empty, inspect raw HTML with:
-      python test_university.py "NUS" --raw
+      NUS exposes an RSS feed for each careers category. 545744 catid is
+      "Academic and Research Positions". Far more reliable than scraping
+      the JS-rendered portal (no Playwright, no WAF risk). Selectors are
+      required by the dataclass but unused for fetcher=rss — _parse_rss
+      uses fixed RSS 2.0 conventions.
 
   # -------------------------------------------------------------------------
   # Nanyang Technological University — now on Workday
@@ -72,10 +80,9 @@ universities:
   # -------------------------------------------------------------------------
   - name: Nanyang Technological University
     jobs_url: https://ntu.wd3.myworkdayjobs.com/Careers
-    posting_selector: "li[data-automation-id='jobResult']"
+    posting_selector: "section[data-automation-id='jobResults'] li"
     title_selector: "a[data-automation-id='jobTitle']"
     link_selector: "a[data-automation-id='jobTitle']"
-    location_selector: "[data-automation-id='locations']"
     must_match:
       - geography
       - asia
@@ -84,12 +91,18 @@ universities:
       - social
       - anthropology
       - humanities
+      - history
+      - urban
       - global
     fetcher: playwright
-    wait_for_selector: "a[data-automation-id='jobTitle']"
+    wait_for_selector: "section[data-automation-id='jobResults']"
+    scroll_to_bottom: true
     notes: |
-      Workday SPA. Some NTU schools post via Interfolio instead -- an
-      Interfolio aggregator scout would catch those too (planned).
+      Workday SPA, ~856 jobs across 43 pages. Page 1 only (~20 results).
+      NTU is tech-heavy; humanities/social science hits will be rare —
+      that's expected, not a bug. Anchor on data-automation-id, not
+      auto-generated css-* class names. Wait on jobResults section (not
+      individual title links) to avoid visibility timeouts.
 
   # -------------------------------------------------------------------------
   # CUNY Graduate Center
@@ -100,12 +113,9 @@ universities:
   # -------------------------------------------------------------------------
   - name: CUNY Graduate Center
     jobs_url: https://www.gc.cuny.edu/human-resources/employment-opportunities
-    # Listings appear as anchor tags with "Job ID NNNNN" in the text.
-    # We grab all anchors in the main content and rely on must_match to
-    # filter out navigation links.
-    posting_selector: "main a, article a, .field a"
-    title_selector: "main a, article a, .field a"
-    link_selector: "main a, article a, .field a"
+    posting_selector: "li[data-list-item-id]"
+    title_selector: "a"
+    link_selector: "a"
     must_match:
       - geography
       - asia
@@ -118,7 +128,14 @@ universities:
       - international
       - sociology
       - history
-    fetcher: requests
+      - philosophy
+      - cultural
+    fetcher: playwright
+    wait_for_selector: "li[data-list-item-id]"
     notes: |
-      Graduate Center is CUNY's research-focused unit and the strongest
-      fit. Hunter and Baruch can be added as separate entries later.
+      Listings are <li data-list-item-id="..."> wrapping a single <a>.
+      Link text is "Job ID NNNNN - <title>". Page aggregates Faculty,
+      HEO, and Staff postings; must_match filters to academic-relevant.
+      WAF blocks gc.cuny.edu from cloud IPs — Playwright from a home IP
+      works, but this scout will likely fail on GitHub Actions. Long-term
+      fix: find a CUNY RSS or pivot to cuny.jobs aggregator.

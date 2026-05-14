@@ -2,20 +2,29 @@
 Generic university scout.
 
 Reads `config/universities.yaml` and produces one `UniversityScout` instance
-per entry. Each entry can use one of two fetchers:
+per entry. Each entry can use one of three fetchers:
 
-  fetcher: requests    — fast, lightweight, works for server-rendered HTML.
-  fetcher: playwright  — slow (~10s/site), spins up headless Chromium.
+  fetcher: requests    - Fast, lightweight, works for server-rendered HTML.
+  fetcher: playwright  - Slow (around 10s/site), spins up headless Chromium.
                          Use this for JS-rendered portals (Workday, some
                          single-page-app career sites). Optional config:
                          `wait_for_selector` lets you wait until a specific
                          CSS selector is present before grabbing HTML.
+                         `scroll_to_bottom` triggers lazy-loaded content.
+  fetcher: rss         - Fetches an RSS/XML feed and parses <item> entries.
+                         Much more reliable than HTML scraping for sites
+                         that publish one (SuccessFactors, SAP-based career
+                         portals, many Drupal sites). The posting/title/link
+                         selectors in the YAML are required by the dataclass
+                         but unused for fetcher=rss; _parse_rss uses fixed
+                         RSS 2.0 conventions instead.
 
 NOTE on Playwright + GitHub Actions: many university WAFs block requests
 from cloud IP ranges (Azure, AWS) regardless of browser. If a site returns
 403 even with Playwright, you'll see it in source-health. The remediation
-is usually to find an alternate feed (Interfolio, RSS, the institution's
-own RSS, or an aggregator that already indexes that university).
+is usually to find an alternate feed (Interfolio, RSS, an aggregator that
+already indexes that university) or accept that the scrape only works
+when run from a residential IP.
 
 A `must_match` pre-filter on the title cheaply discards obviously-irrelevant
 listings before the LLM relevance pass, to save API calls.
@@ -101,9 +110,13 @@ class UniversityScout(Scout):
     def fetch(self) -> list[Posting]:
         if self.fetcher == "playwright":
             html = self._fetch_playwright(self.jobs_url)
+            return self._parse(html)[:MAX_RESULTS_PER_UNIVERSITY]
+        elif self.fetcher == "rss":
+            xml = self._fetch_requests(self.jobs_url)
+            return self._parse_rss(xml)[:MAX_RESULTS_PER_UNIVERSITY]
         else:
             html = self._fetch_requests(self.jobs_url)
-        return self._parse(html)[:MAX_RESULTS_PER_UNIVERSITY]
+            return self._parse(html)[:MAX_RESULTS_PER_UNIVERSITY]
 
     # ---------- fetchers ----------
 
@@ -138,7 +151,7 @@ class UniversityScout(Scout):
                 "workflow does this automatically)."
             ) from e
 
-        logger.info("[playwright] %s — fetching %s", self.display_name, url)
+        logger.info("[playwright] %s -- fetching %s", self.display_name, url)
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             try:
@@ -161,7 +174,7 @@ class UniversityScout(Scout):
                             timeout=PLAYWRIGHT_TIMEOUT,
                         )
                     except Exception as e:
-                        # Surface this clearly — usually means the selector
+                        # Surface this clearly -- usually means the selector
                         # is wrong or the site changed its DOM.
                         raise RuntimeError(
                             f"playwright: wait_for_selector "
@@ -232,6 +245,43 @@ class UniversityScout(Scout):
             description=description,
             location=location,
         )
+
+    def _parse_rss(self, xml: str) -> list[Posting]:
+        """Parse an RSS feed of postings.
+
+        Standard RSS 2.0: each <item> has <title>, <link>, <description>,
+        and optionally <pubDate>. We use BeautifulSoup with xml mode so
+        CDATA blocks and namespaces are handled correctly. Description
+        often contains HTML; we strip it to plain text for the LLM.
+        """
+        soup = BeautifulSoup(xml, "xml")
+        postings: list[Posting] = []
+        for item in soup.find_all("item"):
+            title_el = item.find("title")
+            link_el = item.find("link")
+            desc_el = item.find("description")
+            if not title_el or not link_el:
+                continue
+            title = title_el.get_text(strip=True)
+            url = link_el.get_text(strip=True)
+            if not title or not url:
+                continue
+            description = ""
+            if desc_el:
+                # Description is usually HTML inside CDATA. Strip tags.
+                raw = desc_el.get_text(strip=True)
+                description = BeautifulSoup(raw, "lxml").get_text(" ", strip=True)
+            if self.must_match and not self._title_matches(title):
+                continue
+            postings.append(Posting(
+                source=self.name,
+                title=title,
+                institution=self.display_name,
+                url=url,
+                description=description,
+                location=None,
+            ))
+        return postings
 
     def _title_matches(self, title: str) -> bool:
         t = title.lower()

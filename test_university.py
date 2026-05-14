@@ -26,7 +26,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--raw", action="store_true",
-        help="Dump fetched HTML to /tmp/<name>.html for selector debugging",
+        help="Dump fetched HTML to temp dir for selector debugging",
     )
     args = parser.parse_args()
 
@@ -58,11 +58,13 @@ def main() -> int:
     print()
 
     if args.raw:
+        import tempfile
         if scout.fetcher == "playwright":
             html = scout._fetch_playwright(scout.jobs_url)
         else:
             html = scout._fetch_requests(scout.jobs_url)
-        out = Path("/tmp") / f"{scout.display_name.replace(' ', '_')}.html"
+        out_dir = Path(tempfile.gettempdir())
+        out = out_dir / f"{scout.display_name.replace(' ', '_')}.html"
         out.write_text(html, encoding="utf-8")
         print(f"Wrote raw HTML to {out} ({len(html):,} bytes)")
         return 0
@@ -82,7 +84,6 @@ def main() -> int:
     if len(postings) > 20:
         print(f"  ... and {len(postings) - 20} more")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
