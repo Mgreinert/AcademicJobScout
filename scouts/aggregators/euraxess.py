@@ -1,26 +1,29 @@
 """
 EURAXESS scout.
 
-EURAXESS is the European Commission's job portal for researchers. It covers
-jobs across 43 European countries plus worldwide hubs. We scrape its public
-search results page (no public consumption API as of 2026).
+EURAXESS is the European Commission's job portal for researchers.
+It covers jobs across 40+ European countries plus worldwide hubs.
 
-Strategy:
-  - Build a search URL using a small set of keywords from Jasnea's profile
-    (political geography, border studies, Asia studies, human geography).
-  - Parse each result card into a Posting.
-  - Cap results so a search blow-up doesn't flood the digest; the LLM filter
-    will further trim by fit score.
+Strategy (revised after first real run):
+
+  Euraxess strips query parameters from the search URL — keyword filtering
+  is done client-side via form interaction. Rather than reverse-engineer
+  that, we just scrape the default search page (10 most recent postings
+  across all fields), and let the LLM relevance filter handle the topical
+  cut downstream. Signal-to-noise is worse than keyword filtering, but
+  reliability is much better and the LLM is the real filter anyway.
+
+  This means at most 10 postings/week from Euraxess, which is fine — the
+  digest is curated, not exhaustive.
 
 Failure modes:
-  - HTTP errors raise to the orchestrator, which records FETCH_FAILED.
-  - HTML structure changes return an empty list, which the orchestrator
-    records as PARSE_EMPTY.
+  - HTTP errors raise to the orchestrator (records FETCH_FAILED).
+  - HTML structure changes return an empty list (PARSE_EMPTY).
 """
 from __future__ import annotations
 
 import logging
-from urllib.parse import urljoin, urlencode
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -32,133 +35,105 @@ from scouts import Scout
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://euraxess.ec.europa.eu"
-SEARCH_PATH = "/jobs/search"
-
-# Keywords tuned to the researcher's field. The LLM does the precise filtering
-# downstream, so we cast a moderately wide net here.
-SEARCH_KEYWORDS = [
-    "political geography",
-    "human geography",
-    "border studies",
-    "asian studies",
-    "geopolitics",
-]
-
-# Results per keyword query — Euraxess paginates at ~10/page. We grab the
-# first page only; if a search returns >10 relevant new results per week,
-# that's a luxury problem we can address by paginating.
-MAX_RESULTS_PER_KEYWORD = 10
+SEARCH_URL = f"{BASE_URL}/jobs/search"
 
 REQUEST_TIMEOUT = 30
-USER_AGENT = "academic-job-scout/0.1 (personal use)"
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+)
+MAX_RESULTS = 20
 
 
 class EuraxessScout(Scout):
     name = "euraxess"
 
     def fetch(self) -> list[Posting]:
-        seen_urls: set[str] = set()
-        postings: list[Posting] = []
-
-        for keyword in SEARCH_KEYWORDS:
-            try:
-                results = self._search(keyword)
-            except Exception as e:
-                logger.warning("Euraxess search failed for %r: %s", keyword, e)
-                # Re-raise only if EVERY keyword fails; for now, continue
-                continue
-
-            for p in results:
-                if p.url in seen_urls:
-                    continue
-                seen_urls.add(p.url)
-                postings.append(p)
-
-        return postings
-
-    def _search(self, keyword: str) -> list[Posting]:
-        params = {"keywords": keyword}
-        url = f"{BASE_URL}{SEARCH_PATH}?{urlencode(params)}"
-        logger.info("Euraxess: fetching %s", url)
-
+        logger.info("Euraxess: fetching %s", SEARCH_URL)
         resp = requests.get(
-            url,
-            headers={"User-Agent": USER_AGENT, "Accept": "text/html"},
+            SEARCH_URL,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.7",
+            },
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
-
-        return self._parse(resp.text)[:MAX_RESULTS_PER_KEYWORD]
+        return self._parse(resp.text)[:MAX_RESULTS]
 
     def _parse(self, html: str) -> list[Posting]:
         """Parse Euraxess search results page.
 
-        The current (2026) markup wraps each job in an article element with
-        a class containing 'job' or 'search-result'. We try a few selectors
-        to be resilient to small markup tweaks; if all return nothing, we
-        return [] and the orchestrator flags PARSE_EMPTY.
+        The current markup (2026) presents each posting as a card with:
+          - a link to the detail page (path includes 'jobs/' and an id)
+          - title text inside the card
+          - posted date, country, hiring org metadata
+
+        We try multiple plausible selectors so small markup tweaks don't
+        break us, and degrade to an empty list (PARSE_EMPTY) if all fail.
         """
         soup = BeautifulSoup(html, "lxml")
         postings: list[Posting] = []
 
-        # Try several plausible selectors for a job card.
-        candidates = (
-            soup.select("article.job-offer")
-            or soup.select("article[class*='job']")
-            or soup.select("div.search-result")
-            or soup.select("li.search-result")
-            or soup.select("div[class*='result-item']")
-        )
+        # Find all anchors that look like they point to a job detail page.
+        # Euraxess detail URLs typically look like /jobs/<id>-<slug>
+        job_links = soup.select("a[href^='/jobs/']")
+        seen_hrefs: set[str] = set()
 
-        for card in candidates:
-            try:
-                p = self._parse_card(card)
-                if p:
-                    postings.append(p)
-            except Exception as e:
-                logger.debug("Euraxess: failed to parse a card: %s", e)
+        for link in job_links:
+            href = link.get("href", "")
+            # Skip navigation links — only real postings have numeric IDs in path
+            if not href or href in seen_hrefs:
                 continue
+            # Filter out obvious non-postings (search nav, filters)
+            if href in ("/jobs", "/jobs/", "/jobs/search", "/jobs/posting"):
+                continue
+            seen_hrefs.add(href)
+
+            title = link.get_text(" ", strip=True)
+            if not title or len(title) < 8:
+                # Page navigation links usually have very short text
+                continue
+
+            url = urljoin(BASE_URL, href)
+
+            # Walk up to find the enclosing card and grab metadata from it
+            card = link.find_parent(["article", "div", "li"]) or link.parent
+            institution, location, description = self._extract_metadata(card)
+
+            postings.append(
+                Posting(
+                    source=self.name,
+                    title=title,
+                    institution=institution or "(unknown)",
+                    url=url,
+                    description=description,
+                    location=location,
+                )
+            )
 
         return postings
 
-    def _parse_card(self, card) -> Posting | None:
-        # Title + link
-        link = card.select_one("a[href*='/jobs/']") or card.find("a", href=True)
-        if not link:
-            return None
-        title = link.get_text(strip=True)
-        href = link["href"]
-        if not title or not href:
-            return None
-        url = urljoin(BASE_URL, href)
+    @staticmethod
+    def _extract_metadata(card) -> tuple[str, str | None, str]:
+        """Pull institution, location, description out of a card if possible."""
+        institution, location, description = "", None, ""
+        if card is None:
+            return institution, location, description
 
-        # Institution / hiring org — try a few possible attribute classes
-        institution = ""
-        for sel in (".organisation", ".hiring-organisation", "[class*='organisation']", ".job-employer"):
-            el = card.select_one(sel)
-            if el:
-                institution = el.get_text(" ", strip=True)
+        text = card.get_text(" | ", strip=True)
+        # Euraxess cards typically read: "JOB | <Country> | <Org> | Posted on: ..."
+        parts = [p.strip() for p in text.split("|") if p.strip()]
+        for i, part in enumerate(parts):
+            if part.lower() == "job" and i + 2 < len(parts):
+                location = parts[i + 1]
+                institution = parts[i + 2]
                 break
 
-        # Location
-        location = None
-        for sel in (".location", "[class*='location']", ".job-location"):
-            el = card.select_one(sel)
-            if el:
-                location = el.get_text(" ", strip=True)
-                break
+        # Description = whatever paragraph-like text is on the card
+        p = card.find("p")
+        if p:
+            description = p.get_text(" ", strip=True)[:500]
 
-        # Description snippet — first paragraph-ish block on the card
-        description = ""
-        desc_el = card.select_one("p") or card.select_one("[class*='summary']")
-        if desc_el:
-            description = desc_el.get_text(" ", strip=True)
-
-        return Posting(
-            source=self.name,
-            title=title,
-            institution=institution or "(unknown)",
-            url=url,
-            description=description,
-            location=location,
-        )
+        return institution, location, description
