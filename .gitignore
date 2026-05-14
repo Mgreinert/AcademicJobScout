@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local secrets — never commit
+.env.local
+secrets.yaml
+
+# We DO commit data/seen.sqlite and data/digests/ (state persists in repo)

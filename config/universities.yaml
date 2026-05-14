@@ -1,0 +1,144 @@
+# Universities to scrape directly, in addition to aggregators.
+# Push to main and the next Monday run picks up your changes.
+#
+# Fields:
+#   name              Display name shown in the digest.
+#   jobs_url          Page listing faculty/research postings.
+#   posting_selector  CSS selector matching each posting block.
+#   title_selector    CSS selector for the title, relative to a posting block.
+#   link_selector     CSS selector for the URL anchor, relative to a posting.
+#   description_selector  Optional. CSS selector for a description blurb.
+#   location_selector     Optional. CSS selector for posting location.
+#   must_match        Optional. List of lowercase substrings; a posting's
+#                     title must contain at least one. Cheap pre-filter so
+#                     we don't send admin-staff jobs to the LLM.
+#
+#   fetcher           "requests" (fast, server-rendered HTML) or
+#                     "playwright" (boots headless Chromium for SPAs).
+#
+#   wait_for_selector  (playwright only) CSS selector that must appear
+#                     before we collect HTML. For Workday this is usually
+#                     '[data-automation-id="jobTitle"]'.
+#   scroll_to_bottom  (playwright only) Scroll to trigger lazy-loaded rows.
+#
+#   notes             Free-text for the maintainer.
+#
+# CAVEAT: Selectors are educated guesses. On the first real run, some will
+# return 0 results. The source-health section of the digest will flag this
+# clearly, with the failure mode (fetch_failed vs parse_empty).
+
+universities:
+
+  # -------------------------------------------------------------------------
+  # University of Washington
+  #
+  # UW's faculty job board (ap.washington.edu/ahr/academic-jobs/) is the
+  # correct page — NOT the Workday "Jobs Hub", which is for non-academic
+  # staff. The page is server-rendered HTML, but UW's WAF returns 403 to
+  # plain `requests`. Playwright fares slightly better but cloud IPs may
+  # still be blocked. If you see persistent 403s here, the practical fix is
+  # to scrape Interfolio's search instead (every UW faculty posting routes
+  # to apply.interfolio.com).
+  # -------------------------------------------------------------------------
+  - name: University of Washington
+    jobs_url: https://ap.washington.edu/ahr/academic-jobs/
+    posting_selector: "li:has(a[href*='job_id='])"
+    title_selector: "a[href*='position-details']"
+    link_selector: "a[href*='position-details']"
+    must_match:
+      - geography
+      - asia
+      - asian
+      - political
+      - border
+      - anthropology
+      - social
+      - humanities
+      - global
+      - international
+      - jackson school
+    fetcher: playwright
+    wait_for_selector: "a[href*='job_id=']"
+    notes: |
+      Jackson School of International Studies is the main department of
+      interest. UW WAF often 403s cloud IPs; if so, switch to scraping
+      Interfolio's search by institution.
+
+  # -------------------------------------------------------------------------
+  # National University of Singapore
+  #
+  # NUS Careers uses a SuccessFactors portal. Faculty positions are often
+  # also listed on departmental pages — Geography, Asian Studies, ARI
+  # are worth adding separately later.
+  # -------------------------------------------------------------------------
+  - name: National University of Singapore
+    jobs_url: https://careers.nus.edu.sg/job-search-results/?categoryid=8
+    posting_selector: ".job-listing, .search-result, article, [class*='job-card']"
+    title_selector: "a, h2, h3"
+    link_selector: "a"
+    must_match:
+      - geography
+      - asia
+      - asian
+      - political
+      - border
+      - anthropology
+      - social
+      - humanities
+      - global
+    fetcher: playwright
+    wait_for_selector: "a[href*='job']"
+    notes: |
+      SuccessFactors-based portal; needs JS rendering. Departmental pages
+      (FASS Geography, ARI, Asian Studies) often post faculty roles
+      separately — add those as additional entries when ready.
+
+  # -------------------------------------------------------------------------
+  # Nanyang Technological University
+  # -------------------------------------------------------------------------
+  - name: Nanyang Technological University
+    jobs_url: https://www.ntu.edu.sg/about-us/careers/job-opportunities
+    posting_selector: "[class*='job'], article, li:has(a[href*='job'])"
+    title_selector: "a, h2, h3"
+    link_selector: "a"
+    must_match:
+      - geography
+      - asia
+      - asian
+      - political
+      - social
+      - anthropology
+      - humanities
+      - global
+    fetcher: playwright
+    wait_for_selector: "a[href*='job']"
+    notes: |
+      Also check School of Social Sciences and School of Humanities pages
+      individually for faculty calls.
+
+  # -------------------------------------------------------------------------
+  # CUNY — uses cuny.jobs (Symplicity Recruit)
+  #
+  # CUNY is 25 colleges; cuny.jobs aggregates all of them. The Graduate
+  # Center and Hunter are likely the strongest fits for Jasnea's field.
+  # -------------------------------------------------------------------------
+  - name: CUNY (City University of New York)
+    jobs_url: https://cuny.jobs/jobs/?cat=faculty
+    posting_selector: ".job-listing, [class*='search-result'], article, li.job"
+    title_selector: "a, h2, h3"
+    link_selector: "a"
+    must_match:
+      - geography
+      - asia
+      - asian
+      - political
+      - border
+      - anthropology
+      - humanities
+      - urban
+      - international
+    fetcher: requests
+    notes: |
+      cuny.jobs is server-rendered. Hunter College and the CUNY Graduate
+      Center are the most relevant CUNY units for political geography /
+      Asian studies. Worth adding their separate departmental pages later.

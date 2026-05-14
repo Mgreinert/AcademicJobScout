@@ -1,0 +1,73 @@
+name: Weekly Job Scan
+
+on:
+  schedule:
+    # Mondays at 06:00 UTC. Adjust to taste.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:  # allow manual runs from the Actions tab
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to commit the updated seen.sqlite back
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: python -m playwright install --with-deps chromium
+
+      - name: Install Playwright system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: python -m playwright install-deps chromium
+
+      - name: Run scout
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MAILER: ${{ vars.MAILER || 'stub' }}
+          DIGEST_RECIPIENT: ${{ secrets.DIGEST_RECIPIENT }}
+          # Add these when switching off the stub:
+          # RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          # DIGEST_FROM: ${{ secrets.DIGEST_FROM }}
+          # GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          # GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python main.py
+
+      - name: Commit state back to repo
+        run: |
+          git config user.name  "academic-job-scout-bot"
+          git config user.email "actions@github.com"
+          git add data/seen.sqlite data/digests/ || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "weekly scan: $(date -u +%Y-%m-%d)"
+            git push
+          fi
+
+      - name: Upload digest artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest
+          path: data/digests/
+          if-no-files-found: ignore
