@@ -114,6 +114,25 @@ honest reporting. Three eventual fixes to choose from later:
 - Decision pending on Resend vs Gmail SMTP, plus recipient address.
 - Defer until aggregators are in and there's reliably good content to send.
 
+### Euraxess upgrade — high priority for next session
+
+Matthew has built a 47-filter saved search on Euraxess covering Jasnea's
+actual fields (geography subtypes, Asian/regional/oriental studies,
+anthropology, political sciences, history subtypes, sociology, ethnology,
+plus a `tenure` keyword and Job Offer filter). The filters are
+URL-encoded, so the fix is potentially a one-line swap.
+
+The filtered URL (114 results as of 2026-05-15):
+https://euraxess.ec.europa.eu/jobs/search?f%5B0%5D=job_organisation_type%3A531&f%5B1%5D=job_research_field%3A10&f%5B2%5D=job_research_field%3A15&f%5B3%5D=job_research_field%3A16&f%5B4%5D=job_research_field%3A19&f%5B5%5D=job_research_field%3A39&f%5B6%5D=job_research_field%3A94&f%5B7%5D=job_research_field%3A100&f%5B8%5D=job_research_field%3A109&f%5B9%5D=job_research_field%3A110&f%5B10%5D=job_research_field%3A113&f%5B11%5D=job_research_field%3A132&f%5B12%5D=job_research_field%3A133&f%5B13%5D=job_research_field%3A140&f%5B14%5D=job_research_field%3A142&f%5B15%5D=job_research_field%3A144&f%5B16%5D=job_research_field%3A150&f%5B17%5D=job_research_field%3A152&f%5B18%5D=job_research_field%3A197&f%5B19%5D=job_research_field%3A198&f%5B20%5D=job_research_field%3A199&f%5B21%5D=job_research_field%3A208&f%5B22%5D=job_research_field%3A209&f%5B23%5D=job_research_field%3A210&f%5B24%5D=job_research_field%3A211&f%5B25%5D=job_research_field%3A212&f%5B26%5D=job_research_field%3A213&f%5B27%5D=job_research_field%3A214&f%5B28%5D=job_research_field%3A215&f%5B29%5D=job_research_field%3A216&f%5B30%5D=job_research_field%3A217&f%5B31%5D=job_research_field%3A218&f%5B32%5D=job_research_field%3A223&f%5B33%5D=job_research_field%3A228&f%5B34%5D=job_research_field%3A239&f%5B35%5D=job_research_field%3A246&f%5B36%5D=job_research_field%3A249&f%5B37%5D=job_research_field%3A289&f%5B38%5D=job_research_field%3A367&f%5B39%5D=job_research_field%3A373&f%5B40%5D=job_research_field%3A392&f%5B41%5D=job_research_field%3A395&f%5B42%5D=job_research_field%3A400&f%5B43%5D=job_research_field%3A410&f%5B44%5D=job_research_field%3A434&f%5B45%5D=keywords%3Atenure&f%5B46%5D=offer_type%3Ajob_offer&sort%5Bname%5D=created&sort%5Bdirection%5D=DESC
+
+Plan: phase 1 = swap the scraper's URL to this filtered URL (captures
+top ~20 of 114 by date). Phase 2 = add pagination to walk all ~6 pages.
+Test the URL still loads filtered results when hit directly — Euraxess
+may need session state, in which case we'd need Playwright with the
+filter UI or a different approach (saved-search RSS if one exists).
+
+---
+
 ### Aggregators not yet built (unchanged priority list)
 
 1. **H-Net Job Guide** — strong for humanities/social sciences.
