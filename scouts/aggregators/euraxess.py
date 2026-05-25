@@ -119,19 +119,31 @@ class EuraxessScout(Scout):
         all_postings: list[Posting] = []
         seen_urls: set[str] = set()
 
+        # Use a Session so cookies set by Euraxess on page 0 (e.g. session
+        # IDs or CSRF tokens used to validate pagination) persist across
+        # subsequent page requests. Plain requests.get() discards them.
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.7",
+        })
+
+        prev_url: str | None = None
         for page in range(MAX_PAGES):
             page_url = SEARCH_URL if page == 0 else f"{SEARCH_URL}&page={page}"
             logger.info("Euraxess: fetching page %d (%s)", page, page_url[:80] + "...")
+
+            # Polite delay between pages, and set Referer to the previous
+            # page so Drupal pagination validators are happy.
+            headers = {}
+            if prev_url is not None:
+                import time
+                time.sleep(2)
+                headers["Referer"] = prev_url
+
             try:
-                resp = requests.get(
-                    page_url,
-                    headers={
-                        "User-Agent": USER_AGENT,
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                        "Accept-Language": "en-US,en;q=0.7",
-                    },
-                    timeout=REQUEST_TIMEOUT,
-                )
+                resp = session.get(page_url, headers=headers, timeout=REQUEST_TIMEOUT)
                 resp.raise_for_status()
             except requests.RequestException as e:
                 if page == 0:
@@ -163,6 +175,8 @@ class EuraxessScout(Scout):
             if new_count == 0:
                 logger.info("Euraxess: page %d had no new postings; stopping", page)
                 break
+
+            prev_url = page_url
 
         return all_postings[:MAX_RESULTS]
 
