@@ -28,7 +28,7 @@ jobs:
       - name: Get installed Playwright version
         id: playwright-version
         run: |
-          VERSION=$(python -c "import playwright; print(playwright.__version__)")
+          VERSION=$(pip show playwright | grep -i '^Version:' | awk '{print $2}')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Playwright version: $VERSION"
       - name: Cache Playwright browsers
