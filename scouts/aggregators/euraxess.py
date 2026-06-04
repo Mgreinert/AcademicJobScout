@@ -4,37 +4,47 @@ EURAXESS scout.
 EURAXESS is the European Commission's job portal for researchers.
 It covers jobs across 40+ European countries plus worldwide hubs.
 
-Strategy (revised in session #3):
+Strategy (revised in session #4):
 
-  Euraxess respects URL-based filters (verified by hitting the filtered
-  URL with a fresh requests.get and seeing "Search results (1)" come
-  back). So instead of scraping the default search page and letting the
-  LLM cut everything, we scrape a saved-filter URL covering Jasnea's
-  actual fields: geography subtypes, Asian/regional/oriental studies,
-  anthropology, political sciences, history subtypes, sociology,
-  ethnology, plus a `tenure` keyword and the Job Offer filter. That
+  Euraxess respects URL-based filters, so we hit a saved-filter URL
+  covering Jasnea's fields (geography subtypes, Asian/regional/oriental
+  studies, anthropology, political sciences, history subtypes, sociology,
+  ethnology, plus a `tenure` keyword and the Job Offer filter). That
   narrows the result set from thousands to ~100-200 highly relevant
   postings.
 
-  We paginate via &page=N (zero-indexed, Drupal convention), stopping
-  when a page returns no postings. A MAX_PAGES safety cap prevents
-  runaway loops if the parser starts returning false positives on every
-  page (e.g. matching a header link as a posting).
+  PAGINATION (the session-#4 change):
 
-  If Euraxess ever changes the filter taxonomy and these field IDs go
-  stale, the scraper will quietly return fewer/no results -- surface
-  via the source-health system.
+  Building &page=N URLs with plain `requests` works from a residential
+  IP but is silently ignored from cloud IP ranges (GitHub Actions, etc.):
+  page 1 comes back identical to page 0. We confirmed across session #3
+  that cookies (Session), inter-page delays, and Referer headers do not
+  fix this -- it's IP-level behaviour on Euraxess's side, not something a
+  request header can change.
+
+  The fix: drive pagination with a real browser (Playwright). We load
+  page 0, parse it, then click the ECL "next page" control and re-read
+  the rendered DOM, repeating until there's no next control or a page
+  yields no new postings. Because the page number is now browser
+  navigation state rather than a query parameter we attach, the cloud-IP
+  parameter-stripping no longer applies. This mirrors how the working
+  CUNY / University of Washington Playwright scouts reach the same class
+  of site from Actions.
+
+  If Playwright is unavailable or the next-page control can't be found,
+  we degrade to page-0-only (still returns the freshest postings) rather
+  than failing the whole source.
 
 Failure modes:
-  - HTTP errors raise to the orchestrator (records FETCH_FAILED).
+  - HTTP errors / load failures on page 0 raise (records FETCH_FAILED).
   - HTML structure changes return an empty list (PARSE_EMPTY).
+  - Missing next-page control => page-0-only, logged as a warning.
 """
 from __future__ import annotations
 
 import logging
 from urllib.parse import urljoin
 
-import requests
 from bs4 import BeautifulSoup
 
 from core.models import Posting
@@ -103,13 +113,33 @@ SEARCH_URL = (
     "&sort%5Bdirection%5D=DESC"
 )
 
-REQUEST_TIMEOUT = 60  # Euraxess is sometimes slow on filtered queries
+PLAYWRIGHT_TIMEOUT = 60_000     # ms, page-load / selector-wait budget
+PLAYWRIGHT_SETTLE_MS = 2_000    # ms, extra settle time for late XHRs
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
-MAX_RESULTS = 150  # raised from 20 now that we paginate
+MAX_RESULTS = 150  # safety cap on total postings returned
 MAX_PAGES = 10     # safety cap; ~20 postings/page => 200 max scanned
+
+# The card each posting lives in. ECL = Europa Component Library, the EU
+# Commission's design system; these class names are stable across Drupal
+# updates. Waiting on this also confirms results have rendered.
+CARD_SELECTOR = "article.ecl-content-item"
+
+# Candidate selectors for the "next page" pagination control, tried in
+# order. ECL pagination is an <nav> of <a class="ecl-pagination__link">;
+# the "next" link is usually marked with rel="next" or an aria-label.
+# We keep several fallbacks so a small markup tweak degrades to
+# page-0-only rather than breaking. The log records which one matched.
+NEXT_SELECTORS = [
+    "a.ecl-pagination__link[rel='next']",
+    "nav.ecl-pagination a[rel='next']",
+    "a.ecl-pagination__link[aria-label*='Next' i]",
+    "a.ecl-pagination__link[aria-label*='next' i]",
+    "li.ecl-pagination__item--next a",
+    "a[rel='next']",
+]
 
 
 class EuraxessScout(Scout):
@@ -119,75 +149,145 @@ class EuraxessScout(Scout):
         all_postings: list[Posting] = []
         seen_urls: set[str] = set()
 
-        # Use a Session so cookies set by Euraxess on page 0 (e.g. session
-        # IDs or CSRF tokens used to validate pagination) persist across
-        # subsequent page requests. Plain requests.get() discards them.
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.7",
-        })
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as e:
+            raise RuntimeError(
+                "Playwright not installed. Add 'playwright' to requirements.txt "
+                "and run `playwright install chromium` (the GitHub Actions "
+                "workflow does this automatically)."
+            ) from e
 
-        prev_url: str | None = None
-        for page in range(MAX_PAGES):
-            page_url = SEARCH_URL if page == 0 else f"{SEARCH_URL}&page={page}"
-            logger.info("Euraxess: fetching page %d (%s)", page, page_url[:80] + "...")
-
-            # Polite delay between pages, and set Referer to the previous
-            # page so Drupal pagination validators are happy.
-            headers = {}
-            if prev_url is not None:
-                import time
-                time.sleep(2)
-                headers["Referer"] = prev_url
-
+        logger.info("Euraxess: launching Playwright for %s", SEARCH_URL[:80] + "...")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
             try:
-                resp = session.get(page_url, headers=headers, timeout=REQUEST_TIMEOUT)
-                resp.raise_for_status()
-            except requests.RequestException as e:
-                if page == 0:
-                    # First page failure is fatal -- let it propagate.
-                    raise
-                # Mid-pagination failure: log and stop walking, return what
-                # we have rather than failing the whole source.
-                logger.warning("Euraxess: page %d failed (%s); stopping", page, e)
-                break
+                ctx = browser.new_context(user_agent=USER_AGENT)
+                page = ctx.new_page()
 
-            page_postings = self._parse(resp.text)
-            if not page_postings:
-                logger.info("Euraxess: page %d returned no postings; stopping", page)
-                break
+                # ---- Page 0 load is the fatal-if-it-fails step ----
+                resp = page.goto(
+                    SEARCH_URL,
+                    timeout=PLAYWRIGHT_TIMEOUT,
+                    wait_until="domcontentloaded",
+                )
+                if resp is None:
+                    raise RuntimeError("Euraxess: no response object from page.goto")
+                if resp.status >= 400:
+                    raise RuntimeError(f"Euraxess: HTTP {resp.status} from search URL")
 
-            new_count = 0
-            for p in page_postings:
-                if p.url in seen_urls:
-                    continue
-                seen_urls.add(p.url)
-                all_postings.append(p)
-                new_count += 1
+                # Wait for the first batch of cards to render. If this never
+                # appears the page genuinely has no results (or markup
+                # changed) -- treat as PARSE_EMPTY, not a crash.
+                try:
+                    page.wait_for_selector(CARD_SELECTOR, timeout=PLAYWRIGHT_TIMEOUT)
+                except Exception:
+                    logger.warning(
+                        "Euraxess: no %s on page 0 -- 0 results or markup changed",
+                        CARD_SELECTOR,
+                    )
+                    return []
 
-            logger.info("Euraxess: page %d yielded %d new postings (%d on page)",
-                        page, new_count, len(page_postings))
+                page.wait_for_timeout(PLAYWRIGHT_SETTLE_MS)
 
-            # If the page had results but none were new (all already in
-            # seen_urls), we've started seeing the same items -- stop.
-            if new_count == 0:
-                logger.info("Euraxess: page %d had no new postings; stopping", page)
-                break
+                # ---- Walk pages by clicking "next" ----
+                for page_num in range(MAX_PAGES):
+                    page_postings = self._parse(page.content())
+                    new_count = 0
+                    for posting in page_postings:
+                        if posting.url in seen_urls:
+                            continue
+                        seen_urls.add(posting.url)
+                        all_postings.append(posting)
+                        new_count += 1
 
-            prev_url = page_url
+                    logger.info(
+                        "Euraxess: page %d yielded %d new postings (%d on page, %d total)",
+                        page_num, new_count, len(page_postings), len(all_postings),
+                    )
 
-        return all_postings[:MAX_RESULTS]
+                    if len(all_postings) >= MAX_RESULTS:
+                        logger.info("Euraxess: hit MAX_RESULTS cap; stopping")
+                        break
+
+                    # If a page rendered but contributed nothing new, the
+                    # click didn't advance us (or we've looped) -- stop.
+                    if page_num > 0 and new_count == 0:
+                        logger.info("Euraxess: page %d had no new postings; stopping", page_num)
+                        break
+
+                    if not self._go_to_next_page(page):
+                        logger.info("Euraxess: no next-page control after page %d; stopping", page_num)
+                        break
+
+                return all_postings[:MAX_RESULTS]
+            finally:
+                browser.close()
+
+    def _go_to_next_page(self, page) -> bool:
+        """Click the ECL 'next page' control and wait for new cards.
+
+        Returns True if we navigated to a new page, False if there's no
+        next control (last page reached) or the click didn't take effect.
+        """
+        next_locator = None
+        matched_selector = None
+        for selector in NEXT_SELECTORS:
+            locator = page.locator(selector).first
+            try:
+                if locator.count() > 0 and locator.is_visible():
+                    next_locator = locator
+                    matched_selector = selector
+                    break
+            except Exception:
+                continue
+
+        if next_locator is None:
+            return False
+
+        # Capture the first card's URL so we can detect when the page has
+        # actually changed (more robust than waiting on a network event).
+        try:
+            first_before = page.locator(
+                f"{CARD_SELECTOR} h3.ecl-content-block__title a"
+            ).first.get_attribute("href")
+        except Exception:
+            first_before = None
+
+        logger.info("Euraxess: clicking next-page control (%s)", matched_selector)
+        try:
+            next_locator.scroll_into_view_if_needed(timeout=PLAYWRIGHT_TIMEOUT)
+            next_locator.click(timeout=PLAYWRIGHT_TIMEOUT)
+        except Exception as e:
+            logger.warning("Euraxess: next-page click failed (%s); stopping", e)
+            return False
+
+        # Wait until the first card's href differs from before -- that means
+        # the result list re-rendered. Fall back to a fixed settle if the
+        # predicate times out.
+        try:
+            page.wait_for_function(
+                """(prev) => {
+                    const a = document.querySelector(
+                        'article.ecl-content-item h3.ecl-content-block__title a'
+                    );
+                    return a && a.getAttribute('href') !== prev;
+                }""",
+                arg=first_before,
+                timeout=PLAYWRIGHT_TIMEOUT,
+            )
+        except Exception:
+            logger.warning("Euraxess: page didn't visibly change after next-click; stopping")
+            return False
+
+        page.wait_for_timeout(PLAYWRIGHT_SETTLE_MS)
+        return True
 
     def _parse(self, html: str) -> list[Posting]:
         """Parse Euraxess search results page.
 
         Each posting is wrapped in <article class="ecl-content-item"> with
         the title and detail link inside <h3 class="ecl-content-block__title">.
-        This is the EU Commission's ECL (Europa Component Library) design
-        system and these class names are stable across Drupal updates.
-
         Anchoring on the article element excludes the sidebar filter chips,
         which were the source of the bug where filter names like "Cultural
         anthropology" were being scraped as postings.
@@ -195,7 +295,7 @@ class EuraxessScout(Scout):
         soup = BeautifulSoup(html, "lxml")
         postings: list[Posting] = []
 
-        for card in soup.select("article.ecl-content-item"):
+        for card in soup.select(CARD_SELECTOR):
             title_link = card.select_one("h3.ecl-content-block__title a")
             if not title_link:
                 continue
